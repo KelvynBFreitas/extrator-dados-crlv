@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments and tooling
+.venv
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# PDFs reais usados apenas em testes locais (podem conter dados pessoais).
+# Fixtures sintéticas podem ser versionadas em tests/fixtures/.
+*.pdf
+!tests/fixtures/*.pdf
+
+# Notebook local de rascunho (pode conter dados reais)
+testea.ipynb
+testar_crlv copy.ipynb
