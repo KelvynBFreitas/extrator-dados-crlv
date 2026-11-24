@@ -5,6 +5,19 @@ Todas as mudanças relevantes deste projeto são documentadas neste arquivo.
 O formato segue [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/)
 e o projeto usa [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [Não publicado]
+
+### Adicionado
+
+- OCR opcional para PDFs digitalizados com RapidOCR/ONNX, disponível no extra
+  `ocr`.
+- Parâmetros `ocr` e `dpi` em `extrair_dados`, `extrair_dados_bytes` e
+  `extrair_dados_base64`.
+- Atalhos `extrair_dados_robusto` e `extrair_dados_base64_robusto`.
+- Função `aplicar_ocr` para gerar um PDF com camada de texto invisível.
+- Flag `--ocr` no CLI.
+- Exceções `OCRError` e `OCRIndisponivelError`.
+
 ## [0.1.0] - 2026-11-03
 
 ### Adicionado

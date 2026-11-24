@@ -23,6 +23,13 @@ dependencies = ["pymupdf>=1.24,<2"]
 [project.scripts]
 extrator-crlv = "extrator_dados_crlv.cli:main"
 
+[project.optional-dependencies]
+ocr = [
+    "rapidocr-onnxruntime>=1.4.4,<2; python_version < '3.13'",
+    "rapidocr>=3.10,<4; python_version >= '3.13'",
+    "onnxruntime>=1.20; python_version >= '3.13'",
+]
+
 [dependency-groups]
 dev = ["ruff>=0.9"]
 notebooks = [

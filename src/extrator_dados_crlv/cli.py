@@ -71,6 +71,11 @@ def _criar_parser() -> argparse.ArgumentParser:
         help="arquivo de texto contendo o conteúdo base64",
     )
     parser.add_argument(
+        "--ocr",
+        action="store_true",
+        help="aplica OCR em PDFs digitalizados (requer o extra 'ocr')",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="imprime o resultado em JSON (útil para integrações)",
@@ -103,14 +108,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if modo_base64:
         try:
-            resultados.append(extrair_dados(_ler_entrada_base64(args), base64=True))
+            resultados.append(extrair_dados(_ler_entrada_base64(args), base64=True, ocr=args.ocr))
         except (ErroCRLV, OSError, TypeError, UnicodeError) as erro:
             print(f"Erro ao ler base64: {erro}", file=sys.stderr)
             houve_erro = True
     else:
         for nome_arquivo in args.arquivos:
             try:
-                resultados.append(extrair_dados(Path(nome_arquivo)))
+                resultados.append(extrair_dados(Path(nome_arquivo), ocr=args.ocr))
             except (ErroCRLV, OSError) as erro:
                 print(f"Erro ao ler {nome_arquivo}: {erro}", file=sys.stderr)
                 houve_erro = True

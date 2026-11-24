@@ -24,6 +24,7 @@ from .erros import (
     CRLVSemTextoError,
 )
 from .modelos import DadosVeiculo
+from .ocr import DPI_OCR_PADRAO, aplicar_ocr
 
 # Placa antiga (ABC1234) e Mercosul (ABC1D23).
 _PLACA_RE = re.compile(r"\b([A-Z]{3}[0-9][A-Z0-9][0-9]{2})\b")
@@ -334,7 +335,51 @@ def _extrair_do_documento(documento: fitz.Document, identificacao: str) -> Dados
     return DadosVeiculo(arquivo=identificacao, **valores)
 
 
-def _extrair_arquivo(caminho: str | PathLike[str]) -> DadosVeiculo:
+def _extrair_com_ocr(
+    origem: str | PathLike[str] | bytes,
+    identificacao: str,
+    *,
+    dpi: int,
+) -> DadosVeiculo:
+    """Aplica OCR e tenta novamente a extração sobre o PDF resultante."""
+    try:
+        pdf_com_texto = aplicar_ocr(origem, dpi=dpi)
+    except CRLVSemTextoError as erro:
+        raise CRLVSemTextoError(
+            "O OCR não reconheceu texto no PDF. Verifique a qualidade da digitalização."
+        ) from erro
+
+    try:
+        return _extrair_do_documento(_abrir_pdf(pdf_com_texto), identificacao)
+    except CRLVSemTextoError as erro:
+        raise CRLVSemTextoError(
+            "O PDF não possui camada de texto e o OCR não reconheceu os dados do CRLV."
+        ) from erro
+
+
+def _extrair_bytes(
+    conteudo: bytes | bytearray | memoryview,
+    identificacao: str,
+    *,
+    ocr: bool,
+    dpi: int,
+) -> DadosVeiculo:
+    dados = bytes(conteudo)
+    try:
+        resultado = _extrair_do_documento(_abrir_pdf(dados), identificacao)
+    except CRLVSemTextoError:
+        if not ocr:
+            raise
+        return _extrair_com_ocr(dados, identificacao, dpi=dpi)
+    return resultado
+
+
+def _extrair_arquivo(
+    caminho: str | PathLike[str],
+    *,
+    ocr: bool,
+    dpi: int,
+) -> DadosVeiculo:
     if not isinstance(caminho, (str, PathLike)):
         raise TypeError("O caminho do PDF deve ser str ou PathLike.")
 
@@ -349,19 +394,30 @@ def _extrair_arquivo(caminho: str | PathLike[str]) -> DadosVeiculo:
     except Exception as erro:  # PyMuPDF levanta tipos variados para PDF inválido
         raise CRLVInvalidoError(f"Não foi possível abrir o PDF: {caminho_pdf}") from erro
 
-    return _extrair_do_documento(documento, str(caminho_pdf))
+    try:
+        resultado = _extrair_do_documento(documento, str(caminho_pdf))
+    except CRLVSemTextoError:
+        if not ocr:
+            raise
+        return _extrair_com_ocr(caminho_pdf, str(caminho_pdf), dpi=dpi)
+    return resultado
 
 
 def extrair_dados(
     origem: str | PathLike[str] | bytes | bytearray | memoryview,
     *,
     base64: bool = False,
+    ocr: bool = False,
+    dpi: int = DPI_OCR_PADRAO,
 ) -> DadosVeiculo:
     """Extrai placa, chassi e outros dados de um CRLV-e.
 
     Args:
         origem: caminho do arquivo, conteúdo binário do PDF ou string base64.
         base64: quando ``True``, interpreta ``origem`` como conteúdo base64.
+        ocr: quando ``True``, aplica OCR automaticamente se o PDF não tiver
+            camada de texto. Requer o extra ``ocr``.
+        dpi: resolução usada pelo OCR (72 a 600; padrão 300).
 
     Returns:
         :class:`DadosVeiculo` com os campos encontrados. Campos ausentes ficam
@@ -372,26 +428,38 @@ def extrair_dados(
         IsADirectoryError: o caminho informado não é um arquivo.
         CRLVInvalidoError: o conteúdo não é um PDF válido.
         CRLVProtegidoError: o PDF exige senha.
-        CRLVSemTextoError: o PDF não possui camada de texto.
+        CRLVSemTextoError: o PDF não possui camada de texto (e o OCR não foi
+            usado ou não reconheceu texto).
         Base64InvalidoError: o conteúdo base64 é inválido ou não é um PDF.
-        TypeError: o tipo da origem ou do conteúdo é incompatível.
+        OCRIndisponivelError: ``ocr=True``, mas o extra ``ocr`` não foi instalado.
+        OCRError: falha ao executar o OCR.
+        TypeError: o tipo da origem ou o valor de ``dpi`` é incompatível.
+        ValueError: ``dpi`` está fora do intervalo permitido.
     """
     if base64:
         if not isinstance(origem, (str, bytes, bytearray, memoryview)):
             raise TypeError("Com base64=True, a origem deve ser str ou bytes.")
-        return extrair_dados_base64(origem)
+        return extrair_dados_base64(origem, ocr=ocr, dpi=dpi)
 
     if isinstance(origem, (bytes, bytearray, memoryview)):
-        return extrair_dados_bytes(origem)
+        return extrair_dados_bytes(origem, ocr=ocr, dpi=dpi)
 
-    return _extrair_arquivo(origem)
+    return _extrair_arquivo(origem, ocr=ocr, dpi=dpi)
 
 
-def extrair_dados_bytes(conteudo: bytes | bytearray | memoryview) -> DadosVeiculo:
+def extrair_dados_bytes(
+    conteudo: bytes | bytearray | memoryview,
+    *,
+    ocr: bool = False,
+    dpi: int = DPI_OCR_PADRAO,
+) -> DadosVeiculo:
     """Extrai os dados de um CRLV-e já carregado em memória.
 
     Args:
         conteudo: bytes do arquivo PDF.
+        ocr: quando ``True``, aplica OCR automaticamente se o PDF não tiver
+            camada de texto. Requer o extra ``ocr``.
+        dpi: resolução usada pelo OCR (72 a 600; padrão 300).
 
     Returns:
         :class:`DadosVeiculo` com os campos encontrados.
@@ -399,16 +467,23 @@ def extrair_dados_bytes(conteudo: bytes | bytearray | memoryview) -> DadosVeicul
     Raises:
         CRLVInvalidoError: o conteúdo não é um PDF válido.
         CRLVProtegidoError: o PDF exige senha.
-        CRLVSemTextoError: o PDF não possui camada de texto.
-        TypeError: ``conteudo`` não é um tipo binário aceito.
+        CRLVSemTextoError: o PDF não possui camada de texto (e o OCR não foi
+            usado ou não reconheceu texto).
+        OCRIndisponivelError: ``ocr=True``, mas o extra ``ocr`` não foi instalado.
+        OCRError: falha ao executar o OCR.
+        TypeError: ``conteudo`` não é um tipo binário aceito ou ``dpi`` é inválido.
+        ValueError: ``dpi`` está fora do intervalo permitido.
     """
     if not isinstance(conteudo, (bytes, bytearray, memoryview)):
         raise TypeError("O conteúdo do PDF deve ser bytes, bytearray ou memoryview.")
-    return _extrair_do_documento(_abrir_pdf(bytes(conteudo)), _ORIGEM_BYTES)
+    return _extrair_bytes(conteudo, _ORIGEM_BYTES, ocr=ocr, dpi=dpi)
 
 
 def extrair_dados_base64(
     conteudo: str | bytes | bytearray | memoryview,
+    *,
+    ocr: bool = False,
+    dpi: int = DPI_OCR_PADRAO,
 ) -> DadosVeiculo:
     """Extrai os dados de um CRLV-e recebido em base64.
 
@@ -418,6 +493,9 @@ def extrair_dados_base64(
 
     Args:
         conteudo: string ou bytes contendo o PDF em base64.
+        ocr: quando ``True``, aplica OCR automaticamente se o PDF não tiver
+            camada de texto. Requer o extra ``ocr``.
+        dpi: resolução usada pelo OCR (72 a 600; padrão 300).
 
     Returns:
         :class:`DadosVeiculo` com os campos encontrados.
@@ -426,10 +504,59 @@ def extrair_dados_base64(
         Base64InvalidoError: o conteúdo base64 é inválido ou não é um PDF.
         CRLVInvalidoError: o PDF decodificado não é válido.
         CRLVProtegidoError: o PDF exige senha.
-        CRLVSemTextoError: o PDF não possui camada de texto.
-        TypeError: ``conteudo`` não é str nem um tipo binário aceito.
+        CRLVSemTextoError: o PDF não possui camada de texto (e o OCR não foi
+            usado ou não reconheceu texto).
+        OCRIndisponivelError: ``ocr=True``, mas o extra ``ocr`` não foi instalado.
+        OCRError: falha ao executar o OCR.
+        TypeError: ``conteudo`` não é str nem um tipo binário aceito, ou ``dpi``
+            é inválido.
+        ValueError: ``dpi`` está fora do intervalo permitido.
     """
-    return _extrair_do_documento(
-        _abrir_pdf(_decodificar_base64(conteudo)),
+    return _extrair_bytes(
+        _decodificar_base64(conteudo),
         _ORIGEM_BASE64,
+        ocr=ocr,
+        dpi=dpi,
     )
+
+
+def extrair_dados_robusto(
+    origem: str | PathLike[str] | bytes | bytearray | memoryview,
+    *,
+    base64: bool = False,
+    dpi: int = DPI_OCR_PADRAO,
+) -> DadosVeiculo:
+    """Extrai dados com fallback automático de OCR para PDFs digitalizados.
+
+    Equivale a ``extrair_dados(origem, base64=base64, ocr=True, dpi=dpi)``.
+    Requer o extra ``ocr`` instalado: ``pip install "extrator-dados-crlv[ocr]"``.
+
+    Args:
+        origem: caminho do arquivo, conteúdo binário do PDF ou string base64.
+        base64: quando ``True``, interpreta ``origem`` como conteúdo base64.
+        dpi: resolução usada pelo OCR (72 a 600; padrão 300).
+
+    Returns:
+        :class:`DadosVeiculo` com os campos encontrados.
+    """
+    return extrair_dados(origem, base64=base64, ocr=True, dpi=dpi)
+
+
+def extrair_dados_base64_robusto(
+    conteudo: str | bytes | bytearray | memoryview,
+    *,
+    dpi: int = DPI_OCR_PADRAO,
+) -> DadosVeiculo:
+    """Extrai dados de um base64 com fallback automático de OCR.
+
+    Equivale a ``extrair_dados_base64(conteudo, ocr=True, dpi=dpi)``.
+    Requer o extra ``ocr`` instalado: ``pip install "extrator-dados-crlv[ocr]"``.
+
+    Args:
+        conteudo: string ou bytes contendo o PDF em base64.
+        dpi: resolução usada pelo OCR (72 a 600; padrão 300).
+
+    Returns:
+        :class:`DadosVeiculo` com os campos encontrados.
+    """
+    return extrair_dados_base64(conteudo, ocr=True, dpi=dpi)

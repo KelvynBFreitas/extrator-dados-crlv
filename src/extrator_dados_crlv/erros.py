@@ -23,10 +23,20 @@ class Base64InvalidoError(CRLVInvalidoError):
     """O conteúdo base64 é inválido ou não representa um PDF."""
 
 
+class OCRError(ErroCRLV):
+    """Falha ao aplicar OCR no PDF."""
+
+
+class OCRIndisponivelError(OCRError):
+    """O suporte opcional de OCR não está instalado."""
+
+
 __all__ = [
     "Base64InvalidoError",
     "CRLVInvalidoError",
     "CRLVProtegidoError",
     "CRLVSemTextoError",
     "ErroCRLV",
+    "OCRError",
+    "OCRIndisponivelError",
 ]

@@ -6,7 +6,8 @@
 Biblioteca Python para extrair **placa**, **chassi** e outros dados de um
 **CRLV-e** (Certificado de Registro e Licenciamento de Veículo) em PDF.
 
-Não usa OCR: funciona em PDFs que possuem camada de texto.
+A leitura principal usa a camada de texto do PDF. Para PDFs digitalizados, há
+um fallback opcional de OCR com RapidOCR (ONNX).
 
 O pacote é importado como `extrator_dados_crlv` e o comando de linha de
 comando instalado é `extrator-crlv`.
@@ -33,6 +34,22 @@ pip install "git+https://github.com/KelvynBFreitas/extrator-dados-crlv.git"
 
 Requisitos: **Python 3.11+** e **PyMuPDF**.
 
+### OCR opcional
+
+Para ler CRLVs digitalizados (PDF sem camada de texto), instale o extra
+`ocr`, que adiciona o RapidOCR e o ONNX Runtime:
+
+```bash
+pip install ".[ocr]"
+```
+
+```bash
+uv add "extrator-dados-crlv[ocr]"
+```
+
+O primeiro uso do OCR inicializa os modelos ONNX e pode levar alguns segundos.
+Depois o motor fica em memória.
+
 ## Uso como biblioteca
 
 ```python
@@ -57,6 +74,8 @@ print(dados.para_dict()) # dicionário com todos os campos
 | Base64 | `extrair_dados_base64(conteudo_b64)` |
 | Base64 com flag | `extrair_dados(conteudo_b64, base64=True)` |
 | Data URI | `extrair_dados_base64("data:application/pdf;base64,...")` |
+| Arquivo digitalizado | `extrair_dados("crlv.pdf", ocr=True)` |
+| Base64 digitalizado | `extrair_dados_base64_robusto(conteudo_b64)` |
 
 A leitura por base64 aceita base64 padrão e URL-safe, com ou sem quebras de
 linha, com ou sem o preenchimento `=` final e data URIs completas.
@@ -83,6 +102,41 @@ dados = extrair_dados_base64(conteudo_base64)
 dados = extrair_dados(conteudo_base64, base64=True)
 ```
 
+### PDFs digitalizados (OCR)
+
+Quando o PDF não possui camada de texto, use `ocr=True` (ou uma das funções
+`*_robusto`, que são atalhos) para acionar o RapidOCR:
+
+```python
+from pathlib import Path
+
+from extrator_dados_crlv import (
+    aplicar_ocr,
+    extrair_dados,
+    extrair_dados_base64_robusto,
+    extrair_dados_robusto,
+)
+
+# Arquivo digitalizado
+dados = extrair_dados("crlv-digitalizado.pdf", ocr=True)
+dados = extrair_dados_robusto("crlv-digitalizado.pdf")  # equivalente
+
+# Base64 digitalizado
+dados = extrair_dados_base64_robusto(conteudo_base64)
+
+# Bytes digitalizados
+dados = extrair_dados(conteudo_pdf, ocr=True)
+
+# Útil para pré-processar e salvar o PDF com a camada de texto invisível
+pdf_com_texto = aplicar_ocr("crlv-digitalizado.pdf")
+Path("crlv-ocr.pdf").write_bytes(pdf_com_texto)
+```
+
+O OCR é executado a 300 DPI por padrão e pode ser ajustado com `dpi=...`
+(entre 72 e 600). O texto reconhecido é inserido de forma invisível nas
+coordenadas da imagem; a extração então é executada novamente. Se o PDF já
+possui texto, o OCR não é acionado.
+
 ### Retorno
 
 `extrair_dados*` retorna um `DadosVeiculo` imutável com os campos:
@@ -106,6 +160,8 @@ informado ou os marcadores `<bytes>` / `<base64>`, conforme a entrada. Use:
 | `CRLVProtegidoError` | PDF protegido por senha |
 | `CRLVSemTextoError` | PDF sem camada de texto (digitalizado) |
 | `Base64InvalidoError` | Base64 inválido ou que não representa um PDF |
+| `OCRError` | Falha ao renderizar, executar ou gravar o OCR |
+| `OCRIndisponivelError` | OCR solicitado, mas o extra `ocr` não está instalado |
 | `FileNotFoundError` | Caminho de arquivo inexistente |
 | `IsADirectoryError` | O caminho informado não é um arquivo |
 | `TypeError` | Tipo de entrada incompatível |
@@ -138,8 +194,9 @@ O pacote também instala o comando `extrator-crlv`:
 ```bash
 extrator-crlv "crlv.pdf"
 extrator-crlv --json "crlv.pdf"
+extrator-crlv --ocr "crlv-digitalizado.pdf" --json
 extrator-crlv --base64 "JVBERi0xLjQK..." --json
-extrator-crlv --base64-arquivo crlv_base64.txt --json
+extrator-crlv --base64-arquivo crlv_base64.txt --ocr --json
 ```
 
 No Windows, para ler o base64 da entrada padrão:
@@ -165,6 +222,10 @@ depois os valores. Por isso o extrator:
 4. Valida placa (padrão antigo e Mercosul) e chassi (17 caracteres VIN).
 5. Se o layout fugir do esperado, procura os padrões no documento inteiro.
 
+Se não houver camada de texto e o OCR estiver habilitado, o RapidOCR rasteriza
+as páginas (300 DPI por padrão), injeta o texto reconhecido de forma invisível,
+preservando as coordenadas, e a extração é executada novamente.
+
 ## Desenvolvimento
 
 ```bash
@@ -172,6 +233,13 @@ uv sync
 uv run python -m unittest discover -s tests -v
 uv run ruff check .
 uv run ruff format --check .
+```
+
+Para executar também o teste de integração com o OCR real:
+
+```bash
+uv sync --extra ocr
+uv run python -m unittest discover -s tests -v
 ```
 
 Os testes principais usam um CRLV **sintético**, gerado em tempo de execução,
@@ -194,7 +262,10 @@ Distribuído sob a licença [MIT](LICENSE).
 
 ## Limitações e segurança
 
-- PDFs digitalizados (imagem) precisam de OCR antes da extração.
+- PDFs digitalizados dependem do extra `ocr`; a qualidade varia com a
+  resolução, o contraste e a orientação da digitalização.
+- O OCR é mais lento e consome mais memória que a leitura direta da camada de
+  texto.
 - PDFs protegidos por senha não são suportados.
 - Layouts muito diferentes do CRLV padrão podem exigir ajuste nos rótulos.
 - A biblioteca apenas extrai texto; **não valida assinatura digital, QR Code,

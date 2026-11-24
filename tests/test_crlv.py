@@ -1,10 +1,13 @@
 import base64
+import importlib.util
 import io
 import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import pymupdf
 
@@ -15,10 +18,17 @@ from extrator_dados_crlv import (
     CRLVSemTextoError,
     DadosVeiculo,
     ErroCRLV,
+    OCRError,
+    OCRIndisponivelError,
+    aplicar_ocr,
     extrair_dados,
     extrair_dados_base64,
+    extrair_dados_base64_robusto,
     extrair_dados_bytes,
+    extrair_dados_robusto,
 )
+from extrator_dados_crlv import crlv as modulo_crlv
+from extrator_dados_crlv import ocr as modulo_ocr
 from extrator_dados_crlv.cli import main
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -97,6 +107,59 @@ def _pdf_protegido() -> bytes:
 
 PDF_SINTETICO = _criar_crlv_sintetico()
 PDF_BASE64 = base64.b64encode(PDF_SINTETICO).decode("ascii")
+
+TEM_OCR = (
+    importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    or importlib.util.find_spec("rapidocr") is not None
+)
+
+
+def _pdf_digitalizado() -> bytes:
+    """Rasteriza o CRLV sintético para simular um PDF escaneado (sem texto)."""
+    with pymupdf.open(stream=PDF_SINTETICO, filetype="pdf") as original:
+        pix = original[0].get_pixmap(dpi=300)
+
+    with pymupdf.open() as documento:
+        pagina = documento.new_page(width=595, height=842)
+        pagina.insert_image(pagina.rect, stream=pix.tobytes("png"))
+        return documento.tobytes()
+
+
+class _EngineOCRSimulado:
+    """Imita a saída do RapidOCR com coordenadas em pixels (300 dpi)."""
+
+    def __init__(self, dpi: int = 300) -> None:
+        self.fator = dpi / 72.0
+
+    def _caixa(self, x0: float, y0: float, x1: float, y1: float) -> list[list[float]]:
+        return [
+            [x0 * self.fator, y0 * self.fator],
+            [x1 * self.fator, y0 * self.fator],
+            [x1 * self.fator, y1 * self.fator],
+            [x0 * self.fator, y1 * self.fator],
+        ]
+
+    def __call__(
+        self, imagem: object
+    ) -> tuple[list[tuple[list[list[float]], str, float]], list[float]]:
+        return [
+            (self._caixa(31, 120, 70, 133), "PLACA", 1.0),
+            (self._caixa(31, 135, 100, 150), "ABC1D23", 1.0),
+            (self._caixa(160, 420, 210, 433), "CHASSI", 1.0),
+            (self._caixa(160, 435, 300, 450), "9BRK3AAG9P0000000", 1.0),
+        ], [0.0]
+
+
+class _EngineOCRSimuladoV3(_EngineOCRSimulado):
+    """Imita a saída do rapidocr >= 3 (objeto com boxes/txts/scores)."""
+
+    def __call__(self, imagem: object) -> SimpleNamespace:
+        itens, _ = super().__call__(imagem)
+        return SimpleNamespace(
+            boxes=[item[0] for item in itens],
+            txts=[item[1] for item in itens],
+            scores=[item[2] for item in itens],
+        )
 
 
 class TestExtracao(unittest.TestCase):
@@ -240,6 +303,126 @@ class TestErros(unittest.TestCase):
         self.assertTrue(issubclass(CRLVSemTextoError, CRLVInvalidoError))
 
 
+class TestOCR(unittest.TestCase):
+    def test_aplicar_ocr_pdf_invalido(self) -> None:
+        with self.assertRaises(CRLVInvalidoError):
+            aplicar_ocr(b"isto nao e um pdf")
+
+    def test_aplicar_ocr_pdf_protegido(self) -> None:
+        with self.assertRaises(CRLVProtegidoError):
+            aplicar_ocr(_pdf_protegido())
+
+    def test_aplicar_ocr_dpi_invalido(self) -> None:
+        with self.assertRaises(ValueError):
+            aplicar_ocr(_pdf_sem_texto(), dpi=10)
+        with self.assertRaises(TypeError):
+            aplicar_ocr(_pdf_sem_texto(), dpi=True)  # type: ignore[arg-type]
+
+    def test_aplicar_ocr_sem_dependencia(self) -> None:
+        with (
+            mock.patch.object(modulo_ocr, "_engine", None),
+            mock.patch.object(
+                modulo_ocr,
+                "_carregar_engine",
+                side_effect=OCRIndisponivelError("indisponível"),
+            ),
+            self.assertRaises(OCRIndisponivelError),
+        ):
+            aplicar_ocr(_pdf_sem_texto())
+
+    def test_aplicar_ocr_injeta_texto(self) -> None:
+        with mock.patch.object(modulo_ocr, "_engine", _EngineOCRSimulado()):
+            pdf_com_texto = aplicar_ocr(_pdf_sem_texto(), dpi=300)
+
+        dados = extrair_dados_bytes(pdf_com_texto)
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.chassi, "9BRK3AAG9P0000000")
+
+    def test_aplicar_ocr_com_saida_do_rapidocr_v3(self) -> None:
+        with mock.patch.object(modulo_ocr, "_engine", _EngineOCRSimuladoV3()):
+            pdf_com_texto = aplicar_ocr(_pdf_sem_texto(), dpi=300)
+
+        dados = extrair_dados_bytes(pdf_com_texto)
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.chassi, "9BRK3AAG9P0000000")
+
+    def test_aplicar_ocr_sem_texto_reconhecido(self) -> None:
+        engine = mock.Mock(return_value=(None, None))
+        with (
+            mock.patch.object(modulo_ocr, "_engine", engine),
+            self.assertRaises(CRLVSemTextoError),
+        ):
+            aplicar_ocr(_pdf_sem_texto())
+
+    def test_robusto_com_arquivo(self) -> None:
+        with tempfile.TemporaryDirectory() as diretorio:
+            arquivo = Path(diretorio) / "digitalizado.pdf"
+            arquivo.write_bytes(_pdf_sem_texto())
+
+            with mock.patch.object(
+                modulo_crlv, "aplicar_ocr", return_value=PDF_SINTETICO
+            ) as aplicar:
+                dados = extrair_dados_robusto(arquivo)
+
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.chassi, "9BRK3AAG9P0000000")
+        self.assertTrue(dados.completo)
+        aplicar.assert_called_once()
+        self.assertEqual(aplicar.call_args.kwargs["dpi"], 300)
+
+    def test_robusto_com_base64(self) -> None:
+        conteudo = base64.b64encode(_pdf_sem_texto()).decode("ascii")
+
+        with mock.patch.object(modulo_crlv, "aplicar_ocr", return_value=PDF_SINTETICO) as aplicar:
+            dados = extrair_dados_base64_robusto(conteudo)
+
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.chassi, "9BRK3AAG9P0000000")
+        self.assertEqual(dados.arquivo, "<base64>")
+        aplicar.assert_called_once()
+
+    def test_flag_ocr_na_api_unificada(self) -> None:
+        conteudo = base64.b64encode(_pdf_sem_texto()).decode("ascii")
+
+        with mock.patch.object(modulo_crlv, "aplicar_ocr", return_value=PDF_SINTETICO):
+            dados = extrair_dados(conteudo, base64=True, ocr=True)
+
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.arquivo, "<base64>")
+
+    def test_sem_ocr_continua_levantando_erro(self) -> None:
+        with self.assertRaises(CRLVSemTextoError):
+            extrair_dados_bytes(_pdf_sem_texto())
+
+    def test_erro_quando_ocr_nao_reconhece_texto(self) -> None:
+        with (
+            mock.patch.object(
+                modulo_crlv,
+                "aplicar_ocr",
+                side_effect=CRLVSemTextoError("sem texto"),
+            ),
+            self.assertRaises(CRLVSemTextoError),
+        ):
+            extrair_dados_robusto(_pdf_sem_texto())
+
+    def test_erro_de_ocr_nao_e_mascarado(self) -> None:
+        with (
+            mock.patch.object(
+                modulo_crlv,
+                "aplicar_ocr",
+                side_effect=OCRError("falha no OCR"),
+            ),
+            self.assertRaises(OCRError),
+        ):
+            extrair_dados_robusto(_pdf_sem_texto())
+
+    @unittest.skipUnless(TEM_OCR, "extra de OCR não instalado")
+    def test_integracao_ocr_real(self) -> None:
+        dados = extrair_dados_bytes(_pdf_digitalizado(), ocr=True)
+        self.assertEqual(dados.placa, "ABC1D23")
+        self.assertEqual(dados.chassi, "9BRK3AAG9P0000000")
+
+
 class TestCLI(unittest.TestCase):
     def setUp(self) -> None:
         self._diretorio = tempfile.TemporaryDirectory()
@@ -266,6 +449,18 @@ class TestCLI(unittest.TestCase):
         payload = json.loads(saida.getvalue())
         self.assertEqual(payload["placa"], "ABC1D23")
         self.assertEqual(payload["chassi"], "9BRK3AAG9P0000000")
+
+    def test_cli_ocr(self) -> None:
+        dados = extrair_dados_bytes(PDF_SINTETICO)
+
+        with (
+            mock.patch("extrator_dados_crlv.cli.extrair_dados", return_value=dados) as extrair,
+            redirect_stdout(io.StringIO()),
+        ):
+            codigo = main([str(self.arquivo), "--ocr", "--json"])
+
+        self.assertEqual(codigo, 0)
+        self.assertTrue(extrair.call_args.kwargs["ocr"])
 
 
 if __name__ == "__main__":
